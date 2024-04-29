@@ -1,5 +1,4 @@
 mode = "forward"
-log_level = "debug" # optional
 
 [dokodemo]
 target_addr = "8.8.8.8:53"

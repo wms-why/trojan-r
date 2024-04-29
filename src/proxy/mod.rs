@@ -1,3 +1,8 @@
+mod global_config;
+mod client;
+mod server;
+mod forward;
+
 use std::{
     fs::File,
     io::{self, Read},
@@ -35,6 +40,8 @@ use crate::{
         UdpWrite,
     },
 };
+
+use self::{client::ClientProxy, forward::ForwardProxy, server::ServerProxy};
 
 const RELAY_BUFFER_SIZE: usize = 0x4000;
 
@@ -103,39 +110,6 @@ pub async fn relay_tcp<T: ProxyTcpStream, U: ProxyTcpStream>(a: T, b: U) {
     log::info!("tcp session ends");
 }
 
-#[derive(Deserialize)]
-struct GlobalConfig {
-    mode: String,
-    log_level: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ClientConfig {
-    socks5: Socks5AcceptorConfig,
-    trojan: TrojanConnectorConfig,
-    tls: TrojanTlsConnectorConfig,
-    websocket: Option<WebSocketConnectorConfig>,
-    mux: Option<MuxConnectorConfig>,
-}
-
-#[derive(Deserialize)]
-struct ServerConfig {
-    trojan: TrojanAcceptorConfig,
-    tls: Option<TrojanTlsAcceptorConfig>,
-    plaintext: Option<PlaintextAcceptorConfig>,
-    websocket: Option<WebSocketAcceptorConfig>,
-    mux: Option<MuxAcceptorConfig>,
-}
-
-#[derive(Deserialize)]
-struct ForwardConfig {
-    dokodemo: DokodemoAcceptorConfig,
-    trojan: TrojanConnectorConfig,
-    tls: TrojanTlsConnectorConfig,
-    websocket: Option<WebSocketConnectorConfig>,
-    mux: Option<MuxConnectorConfig>,
-}
-
 async fn run_proxy<I: ProxyAcceptor, O: ProxyConnector + 'static>(
     acceptor: I,
     connector: O,
@@ -185,136 +159,58 @@ pub async fn launch_from_config_filename(filename: String) -> io::Result<()> {
     launch_from_config_string(config_string).await
 }
 
-pub async fn launch_from_config_string(config_string: String) -> io::Result<()> {
-    let config: GlobalConfig = toml::from_str(&config_string)?;
-    if let Some(log_level) = config.log_level {
-        let level = match log_level.as_str() {
-            "trace" => LevelFilter::Trace,
-            "debug" => LevelFilter::Debug,
-            "info" => LevelFilter::Info,
-            "warn" => LevelFilter::Warn,
-            "error" => LevelFilter::Error,
-            _ => {
-                return Err(Error::new("invalid log_level").into());
-            }
-        };
-        let _ = env_logger::builder().filter_level(level).try_init();
-    } else {
-        let _ = env_logger::builder()
-            .filter_level(LevelFilter::Debug)
-            .try_init();
+pub(crate) trait Proxy {
+    fn start() -> io::Result<()>;
+}
+
+enum ProxyMode<T> {
+    Server(T),
+    Client(T),
+    Forward(T),
+}
+
+impl From<&str> for ProxyMode {
+    fn from(value: &str) -> Self {
+        match value.trim().to_lowercase().as_str() {
+            "server" => ProxyMode::Server(ServerProxy),
+            "client" => ProxyMode::Client(ClientProxy),
+            "forward" => ProxyMode::Forward(ForwardProxy),
+            _ => panic!("invalid mode: {}", value),
+        }
     }
-    match config.mode.as_str() {
-        #[cfg(feature = "server")]
-        "server" => {
-            log::debug!("server mode");
-            let config: ServerConfig = toml::from_str(&config_string)?;
-            let direct_connector = DirectConnector {};
-            if config.tls.is_none() {
-                if config.plaintext.is_none() {
-                    return Err(Error::new("plaintext/tls section not found").into());
-                }
-                let direct_acceptor = PlaintextAcceptor::new(&config.plaintext.unwrap()).await?;
-                if config.websocket.is_none() {
-                    let trojan_acceptor = TrojanAcceptor::new(&config.trojan, direct_acceptor)?;
-                    if config.mux.is_none() {
-                        run_proxy(trojan_acceptor, direct_connector).await?;
-                    } else {
-                        let mux_acceptor = MuxAcceptor::new(trojan_acceptor, &config.mux.unwrap())?;
-                        run_proxy(mux_acceptor, direct_connector).await?;
-                    }
-                } else {
-                    let ws_acceptor =
-                        WebSocketAcceptor::new(&config.websocket.unwrap(), direct_acceptor)?;
-                    let trojan_acceptor = TrojanAcceptor::new(&config.trojan, ws_acceptor)?;
-                    if config.mux.is_none() {
-                        run_proxy(trojan_acceptor, direct_connector).await?;
-                    } else {
-                        let mux_acceptor = MuxAcceptor::new(trojan_acceptor, &config.mux.unwrap())?;
-                        run_proxy(mux_acceptor, direct_connector).await?;
-                    }
-                }
-            } else {
-                let tls_acceptor = TrojanTlsAcceptor::new(&config.tls.unwrap()).await?;
-                if config.websocket.is_none() {
-                    let trojan_acceptor = TrojanAcceptor::new(&config.trojan, tls_acceptor)?;
-                    if config.mux.is_none() {
-                        run_proxy(trojan_acceptor, direct_connector).await?;
-                    } else {
-                        let mux_acceptor = MuxAcceptor::new(trojan_acceptor, &config.mux.unwrap())?;
-                        run_proxy(mux_acceptor, direct_connector).await?;
-                    }
-                } else {
-                    let ws_acceptor =
-                        WebSocketAcceptor::new(&config.websocket.unwrap(), tls_acceptor)?;
-                    let trojan_acceptor = TrojanAcceptor::new(&config.trojan, ws_acceptor)?;
-                    if config.mux.is_none() {
-                        run_proxy(trojan_acceptor, direct_connector).await?;
-                    } else {
-                        let mux_acceptor = MuxAcceptor::new(trojan_acceptor, &config.mux.unwrap())?;
-                        run_proxy(mux_acceptor, direct_connector).await?;
-                    }
-                }
-            }
+}
+
+impl <T: Proxy> ProxyMode<T> {
+    fn init_proxy(value: T) -> io::Result<()> {
+        value.start()?;
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct BaseConfig{
+    pub mode: String
+}
+
+
+pub async fn launch_from_config_string(config_string: String) -> io::Result<()> {
+    let config: BaseConfig = toml::from_str(&config_string)?;
+
+    let mode : ProxyMode = ProxyMode::from(config.mode.as_str());
+
+    match mode {
+        ProxyMode::Server => {
+            ServerProxy::start();
         }
-        #[cfg(feature = "client")]
         "client" => {
-            log::debug!("client mode");
-            let config: ClientConfig = toml::from_str(&config_string)?;
-            let socks5_acceptor = Socks5Acceptor::new(&config.socks5).await?;
-            let tls_connector = TrojanTlsConnector::new(&config.tls)?;
-            if config.websocket.is_none() {
-                let trojan_connector = TrojanConnector::new(&config.trojan, tls_connector)?;
-                if config.mux.is_none() {
-                    run_proxy(socks5_acceptor, trojan_connector).await?;
-                } else {
-                    let mux_connector =
-                        MuxConnector::new(&config.mux.unwrap(), trojan_connector).unwrap();
-                    run_proxy(socks5_acceptor, mux_connector).await?;
-                }
-            } else {
-                let ws_connector =
-                    WebSocketConnector::new(&config.websocket.unwrap(), tls_connector)?;
-                let trojan_connector = TrojanConnector::new(&config.trojan, ws_connector)?;
-                if config.mux.is_none() {
-                    run_proxy(socks5_acceptor, trojan_connector).await?;
-                } else {
-                    let mux_connector =
-                        MuxConnector::new(&config.mux.unwrap(), trojan_connector).unwrap();
-                    run_proxy(socks5_acceptor, mux_connector).await?;
-                }
-            }
+            ClientProxy::start();
         }
-        #[cfg(feature = "forward")]
         "forward" => {
-            log::debug!("forward mode");
-            let config: ForwardConfig = toml::from_str(&config_string)?;
-            let dokodemo_acceptor = DokodemoAcceptor::new(&config.dokodemo).await?;
-            let tls_connector = TrojanTlsConnector::new(&config.tls)?;
-            if config.websocket.is_none() {
-                let trojan_connector = TrojanConnector::new(&config.trojan, tls_connector)?;
-                if config.mux.is_none() {
-                    run_proxy(dokodemo_acceptor, trojan_connector).await?;
-                } else {
-                    let mux_connector =
-                        MuxConnector::new(&config.mux.unwrap(), trojan_connector).unwrap();
-                    run_proxy(dokodemo_acceptor, mux_connector).await?;
-                }
-            } else {
-                let ws_connector =
-                    WebSocketConnector::new(&config.websocket.unwrap(), tls_connector)?;
-                let trojan_connector = TrojanConnector::new(&config.trojan, ws_connector)?;
-                if config.mux.is_none() {
-                    run_proxy(dokodemo_acceptor, trojan_connector).await?;
-                } else {
-                    let mux_connector =
-                        MuxConnector::new(&config.mux.unwrap(), trojan_connector).unwrap();
-                    run_proxy(dokodemo_acceptor, mux_connector).await?;
-                }
-            }
+            ForwardProxy::start();
         }
         _ => {
             log::error!("invalid mode: {}", config.mode.as_str());
+            return Err(Error::new("invalid mode"));
         }
     }
     Ok(())

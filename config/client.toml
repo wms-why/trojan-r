@@ -1,5 +1,4 @@
 mode = "client"
-log_level = "debug" # optional
 
 [trojan]
 password = "password"

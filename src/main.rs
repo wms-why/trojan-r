@@ -8,6 +8,9 @@ mod proxy;
 
 #[tokio::main]
 async fn main() {
+
+    env_logger::init();
+        
     let matches = App::new("trojan-r")
         .version("v0.1.0")
         .arg(
