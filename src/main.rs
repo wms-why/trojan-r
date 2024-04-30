@@ -1,30 +1,31 @@
 #![forbid(unsafe_code)]
 
-use clap::{App, Arg};
+use clap::{command, Arg, Parser};
 
 mod error;
 mod protocol;
 mod proxy;
 
+#[derive(Parser, Debug)] 
+#[command(term_width = 0)] // Just to make testing across clap features easier
+struct Args {
+    
+    /// Allow invalid UTF-8 paths
+    #[arg(short = 'c', value_name = "config", value_hint = clap::ValueHint::FilePath)]
+    config: std::path::PathBuf,
+
+}
+
+
+
 #[tokio::main]
 async fn main() {
 
     env_logger::init();
-        
-    let matches = App::new("trojan-r")
-        .version("v0.1.0")
-        .arg(
-            Arg::with_name("config")
-                .short("c")
-                .long("config")
-                .required(true)
-                .takes_value(true)
-                .help(".toml config file name"),
-        )
-        .author("Developed by @p4gefau1t (Page Fault)")
-        .about("An unidentifiable mechanism that helps you bypass GFW")
-        .get_matches();
-    let filename = matches.value_of("config").unwrap().to_string();
+
+    let args = Args::parse();
+
+    let filename = args.config.to_string();
     if let Err(e) = proxy::launch_from_config_filename(filename).await {
         println!("failed to launch proxy: {}", e);
     }

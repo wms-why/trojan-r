@@ -1,7 +1,7 @@
-mod global_config;
 mod client;
-mod server;
 mod forward;
+mod global_config;
+mod server;
 
 use std::{
     fs::File,
@@ -9,33 +9,12 @@ use std::{
     sync::Arc,
 };
 
-use log::LevelFilter;
 use serde::Deserialize;
 use tokio::io::{split, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     error::Error,
     protocol::{
-        direct::connector::DirectConnector,
-        dokodemo::acceptor::{DokodemoAcceptor, DokodemoAcceptorConfig},
-        mux::{
-            acceptor::{MuxAcceptor, MuxAcceptorConfig},
-            connector::{MuxConnector, MuxConnectorConfig},
-        },
-        plaintext::acceptor::{PlaintextAcceptor, PlaintextAcceptorConfig},
-        socks5::acceptor::{Socks5Acceptor, Socks5AcceptorConfig},
-        tls::{
-            acceptor::{TrojanTlsAcceptor, TrojanTlsAcceptorConfig},
-            connector::{TrojanTlsConnector, TrojanTlsConnectorConfig},
-        },
-        trojan::{
-            acceptor::{TrojanAcceptor, TrojanAcceptorConfig},
-            connector::{TrojanConnector, TrojanConnectorConfig},
-        },
-        websocket::{
-            acceptor::{WebSocketAcceptor, WebSocketAcceptorConfig},
-            connector::{WebSocketConnector, WebSocketConnectorConfig},
-        },
         AcceptResult, ProxyAcceptor, ProxyConnector, ProxyTcpStream, ProxyUdpStream, UdpRead,
         UdpWrite,
     },
@@ -160,7 +139,7 @@ pub async fn launch_from_config_filename(filename: String) -> io::Result<()> {
 }
 
 pub(crate) trait Proxy {
-    fn start() -> io::Result<()>;
+    async fn start() -> io::Result<()>;
 }
 
 enum ProxyMode<T> {
@@ -169,44 +148,43 @@ enum ProxyMode<T> {
     Forward(T),
 }
 
-impl From<&str> for ProxyMode {
+impl<T: Proxy> From<&str> for ProxyMode<T> {
     fn from(value: &str) -> Self {
         match value.trim().to_lowercase().as_str() {
-            "server" => ProxyMode::Server(ServerProxy),
-            "client" => ProxyMode::Client(ClientProxy),
-            "forward" => ProxyMode::Forward(ForwardProxy),
+            "server" => ProxyMode::Server(ServerProxy {}),
+            "client" => ProxyMode::Client(ClientProxy {}),
+            "forward" => ProxyMode::Forward(ForwardProxy {}),
             _ => panic!("invalid mode: {}", value),
         }
     }
 }
 
-impl <T: Proxy> ProxyMode<T> {
-    fn init_proxy(value: T) -> io::Result<()> {
+impl<T: Proxy> ProxyMode<T> {
+    async fn init_proxy(value: T) -> io::Result<()> {
         value.start()?;
         Ok(())
     }
 }
 
 #[derive(Deserialize)]
-struct BaseConfig{
-    pub mode: String
+struct BaseConfig {
+    pub mode: String,
 }
-
 
 pub async fn launch_from_config_string(config_string: String) -> io::Result<()> {
     let config: BaseConfig = toml::from_str(&config_string)?;
 
-    let mode : ProxyMode = ProxyMode::from(config.mode.as_str());
+    let mode: ProxyMode = ProxyMode::from(config.mode.as_str());
 
     match mode {
-        ProxyMode::Server => {
-            ServerProxy::start();
+        ProxyMode::Server(_) => {
+            ServerProxy::start()?;
         }
-        "client" => {
-            ClientProxy::start();
+        ProxyMode::Client(_) => {
+            ClientProxy::start()?;
         }
-        "forward" => {
-            ForwardProxy::start();
+        ProxyMode::Forward(_) => {
+            ForwardProxy::start()?;
         }
         _ => {
             log::error!("invalid mode: {}", config.mode.as_str());
